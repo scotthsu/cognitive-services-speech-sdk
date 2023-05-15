@@ -10,6 +10,8 @@ import requests
 import time
 import swagger_client
 import os
+import aiohttp
+import asyncio
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG,
         format="%(asctime)s %(message)s", datefmt="%m/%d/%Y %I:%M:%S %p %Z")
@@ -127,7 +129,7 @@ def delete_all_transcriptions(api):
             logging.error(f"Could not delete transcription {transcription_id}: {exc}")
 
 
-def transcribe():
+async def transcribe():
     logging.info("Starting transcription client...")
 
     # configure API key authorization: subscription_key
@@ -169,7 +171,9 @@ def transcribe():
     # Uncomment this block to transcribe all files from a container.
     # transcription_definition = transcribe_from_container(RECORDINGS_CONTAINER_URI, properties)
 
-    created_transcription, status, headers = api.transcriptions_create_with_http_info(transcription=transcription_definition)
+    #created_transcription, status, headers = api.transcriptions_create_with_http_info(transcription=transcription_definition)
+    thread = api.transcriptions_create_with_http_info(transcription=transcription_definition, async_req=True)
+    created_transcription, status, headers = thread.get()
 
     # get the transcription Id from the location URI
     transcription_id = headers["location"].split("/")[-1]
@@ -182,30 +186,39 @@ def transcribe():
 
     completed = False
 
-    while not completed:
-        # wait for 5 seconds before refreshing the transcription status
-        time.sleep(5)
+    async with aiohttp.ClientSession() as session:
+        while not completed:
+            # wait for 5 seconds before refreshing the transcription status
+            await asyncio.sleep(5)
 
-        transcription = api.transcriptions_get(transcription_id)
-        logging.info(f"Transcriptions status: {transcription.status}")
+            # transcription = api.transcriptions_get(transcription_id)
+            thread = api.transcriptions_get(transcription_id, async_req=True)
+            transcription = thread.get()
 
-        if transcription.status in ("Failed", "Succeeded"):
-            completed = True
+            logging.info(f"Transcriptions status: {transcription.status}")
 
-        if transcription.status == "Succeeded":
-            pag_files = api.transcriptions_list_files(transcription_id)
-            for file_data in _paginate(api, pag_files):
-                if file_data.kind != "Transcription":
-                    continue
+            if transcription.status in ("Failed", "Succeeded"):
+                completed = True
 
-                audiofilename = file_data.name
-                results_url = file_data.links.content_url
-                results = requests.get(results_url)
-                logging.info(f"Results for {audiofilename}:\n{results.content.decode('utf-8')}")
-        elif transcription.status == "Failed":
-            logging.info(f"Transcription failed: {transcription.properties.error.message}")
+            if transcription.status == "Succeeded":
+                #pag_files = api.transcriptions_list_files(transcription_id)
+                thread = api.transcriptions_list_files(transcription_id, async_req=True)
+                pag_files = thread.get()
+                for file_data in _paginate(api, pag_files):
+                    if file_data.kind != "Transcription":
+                        continue
+
+                    audiofilename = file_data.name
+                    results_url = file_data.links.content_url
+                    async with session.get(results_url) as resp:
+                        results = await resp.json()
+                        #results = requests.get(results_url)
+                    #logging.info(f"Results for {audiofilename}:\n{results.content.decode('utf-8')}")
+                    logging.info(f"Results for {audiofilename}:\n{results}")
+            elif transcription.status == "Failed":
+                logging.info(f"Transcription failed: {transcription.properties.error.message}")
 
 
 if __name__ == "__main__":
-    transcribe()
+    asyncio.run(transcribe())
 
